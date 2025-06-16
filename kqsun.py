@@ -1,22 +1,20 @@
 import json
-import websocket
+import asyncio
+import websockets
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import asyncio
-import threading
+from telegram.error import TelegramError
 
 # Cấu hình bot Telegram
 BOT_TOKEN = "8053826988:AAFlCP-OPKJdr9XegaryaRkX8gWmnEknwLg"  # Thay bằng token của bot
 CHAT_ID = "-1002596735298"      # Thay bằng chat ID của nhóm
-ADMIN_IDS = [6020088518]  # Thay bằng danh sách ID của admin
+ADMIN_IDS = [123456789]       # Thay bằng danh sách ID của admin
 
 # URL WebSocket
 WS_URL = "ws://163.61.110.10:8000/game_sunwin/ws?id=duy914c&key=dduy1514nsadfl"
 
 # Trạng thái bot
 bot_running = False
-ws_thread = None
-ws_app = None
 
 # Khởi tạo bot Telegram
 bot = Bot(token=BOT_TOKEN)
@@ -26,22 +24,25 @@ async def send_message_to_group(message):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=message)
         print(f"Đã gửi tin nhắn: {message}")
-    except Exception as e:
-        print(f"Lỗi khi gửi tin nhắn: {e}")
+    except TelegramError as e:
+        print(f"Lỗi khi gửi tin nhắn Telegram: {e}")
 
 # Hàm xử lý dữ liệu WebSocket
-def on_message(ws, message):
-    if not bot_running:
-        return
+async def process_websocket_message(message):
     try:
         # Parse dữ liệu JSON
         data = json.loads(message)
-        phien = data.get("Phien")
-        xuc_xac_1 = data.get("Xuc_xac_1")
-        xuc_xac_2 = data.get("Xuc_xac_2")
-        xuc_xac_3 = data.get("Xuc_xac_3")
-        tong = data.get("Tong")
-        ket_qua = data.get("Ket_qua")
+        required_fields = ["Phien", "Xuc_xac_1", "Xuc_xac_2", "Xuc_xac_3", "Tong", "Ket_qua"]
+        if not all(field in data for field in required_fields):
+            print("Lỗi: Thiếu trường dữ liệu JSON")
+            return
+
+        phien = data["Phien"]
+        xuc_xac_1 = data["Xuc_xac_1"]
+        xuc_xac_2 = data["Xuc_xac_2"]
+        xuc_xac_3 = data["Xuc_xac_3"]
+        tong = data["Tong"]
+        ket_qua = data["Ket_qua"]
 
         # Chuyển số thành emoji
         num_to_emoji = {
@@ -51,7 +52,7 @@ def on_message(ws, message):
             15: "1️⃣5️⃣", 16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣"
         }
 
-        # Định dạng tin nhắn theo yêu cầu mới
+        # Định dạng tin nhắn
         msg = (
             f"Kết quả mới nhất sun.win\n"
             f"=====================\n"
@@ -62,37 +63,36 @@ def on_message(ws, message):
         )
 
         # Gửi tin nhắn đến nhóm
-        asyncio.run_coroutine_threadsafe(send_message_to_group(msg), asyncio.get_event_loop())
+        await send_message_to_group(msg)
     except json.JSONDecodeError:
         print("Lỗi: Dữ liệu không phải JSON hợp lệ")
     except Exception as e:
         print(f"Lỗi khi xử lý dữ liệu: {e}")
 
-# Hàm xử lý lỗi WebSocket
-def on_error(ws, error):
-    print(f"Lỗi WebSocket: {error}")
-
-# Hàm khi kết nối WebSocket thành công
-def on_open(ws):
-    print("Đã kết nối đến WebSocket")
-
-# Hàm khi đóng kết nối WebSocket
-def on_close(ws, close_status_code, close_msg):
+# Hàm chạy WebSocket với reconnect
+async def websocket_client():
     global bot_running
-    print("Kết nối WebSocket đã đóng")
-    bot_running = False
-
-# Hàm chạy WebSocket
-def run_websocket():
-    global ws_app
-    ws_app = websocket.WebSocketApp(
-        WS_URL,
-        on_message=on_message,
-        on_error=on_error,
-        on_open=on_open,
-        on_close=on_close
-    )
-    ws_app.run_forever()
+    while True:
+        if not bot_running:
+            await asyncio.sleep(1)
+            continue
+        try:
+            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=10) as ws:
+                print("Đã kết nối đến WebSocket")
+                while bot_running:
+                    try:
+                        message = await asyncio.wait_for(ws.recv(), timeout=60)
+                        await process_websocket_message(message)
+                    except asyncio.TimeoutError:
+                        print("WebSocket timeout, tiếp tục lắng nghe...")
+                    except websockets.ConnectionClosed:
+                        print("Kết nối WebSocket bị đóng, thử kết nối lại...")
+                        break
+        except Exception as e:
+            print(f"Lỗi kết nối WebSocket: {e}")
+            if bot_running:
+                print("Thử kết nối lại sau 5 giây...")
+                await asyncio.sleep(5)
 
 # Hàm xử lý lệnh /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +113,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Hàm xử lý nút inline
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_running, ws_thread, ws_app
+    global bot_running
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -128,8 +128,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Bot đã đang chạy!")
         else:
             bot_running = True
-            ws_thread = threading.Thread(target=run_websocket)
-            ws_thread.start()
             await query.message.reply_text("Bot đã được bật!")
     
     elif query.data == "stop_bot":
@@ -137,10 +135,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Bot đã đang tắt!")
         else:
             bot_running = False
-            if ws_app:
-                ws_app.close()
-            if ws_thread:
-                ws_thread.join()
             await query.message.reply_text("Bot đã được tắt!")
 
 # Hàm chính
@@ -151,6 +145,9 @@ async def main():
     # Thêm handler
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Chạy WebSocket client trong background
+    asyncio.create_task(websocket_client())
 
     # Chạy bot
     await application.run_polling()
